@@ -4092,10 +4092,10 @@ static void MB_UpdateJackSources(int hp)
 			IOConnectCallScalarMethod(gKextConnection, kCmlSOF_SetCaptureSource, &src, 1, NULL, NULL);
 		}
 	}
-	pthread_mutex_lock(&gPlugIn_StateMutex);
+	//	Lock order: StateMutex -> gMB_I2CMutex (StartIO). The jack thread holds the I2C mutex here,
+	//	so it must NEVER take StateMutex (deadlock). 32-bit stores are atomic on x86.
 	gDataSource_Output_Master_Value = hp ? 1 : 0;
 	gDataSource_Input_Master_Value = mic ? 1 : 0;
-	pthread_mutex_unlock(&gPlugIn_StateMutex);
 	MB_NotifySources();
 }
 
@@ -4269,7 +4269,8 @@ static OSStatus	CmlSOF_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectI
 					gFlagsBufferSize = fsize;
 				}
 			}
-			//	Start playback + capture
+			//	Start playback + capture — serialized with the jack thread (I2C shared with the trackpad).
+			pthread_mutex_lock(&gMB_I2CMutex);
 			IOConnectCallScalarMethod(gKextConnection, kCmlSOF_StartPlayback, NULL, 0, NULL, NULL);
 			/* Unmute with Linux play value DAC_SET1=0x10 (not 0x00). */
 			{
@@ -4278,6 +4279,7 @@ static OSStatus	CmlSOF_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectI
 			}
 			IOConnectCallScalarMethod(gKextConnection, kCmlSOF_StartCapture, NULL, 0, NULL, NULL);
 			if(gDataSource_Input_Master_Value) MB_HeadsetMicTune();	//	StartCapture restores the kext's ADC settings
+			pthread_mutex_unlock(&gMB_I2CMutex);
 			pthread_once(&gMB_JackOnce, MB_StartJackThread);
 			/* Pre-reboot fallback: old kext used capTag=2 (SOF Host DMA ch1/SD1)
 			 * while arming SD0. If DPIB0 stays 0, reprogram SD0 + PCM_PARAMS

@@ -217,7 +217,7 @@ bool MateBookAudioDevice::init(OSDictionary *d) {
     for (int i = 0; i < 8; i++) tuning[i] = 0;
     tuning[2] = 3;
     fwStagingLen = 0;
-    commandGate = nullptr; rootDomain = nullptr; powerNotifier = nullptr;
+    commandGate = nullptr; ownWorkLoop = nullptr; rootDomain = nullptr; powerNotifier = nullptr;
     sharedDmaBuf = nullptr; sharedBdlBuf = nullptr;
     capDmaBuf = nullptr; capBdlBuf = nullptr;
     flagsBuf = nullptr;
@@ -340,10 +340,14 @@ bool MateBookAudioDevice::start(IOService *provider) {
               (unsigned long long)fwStagingBuf->getPhysicalAddress());
     }
 
-    if (getWorkLoop()) {
+    /* Own work loop: getWorkLoop() would return the PCI parent's, which VoodooI2C's controller
+     * also uses. Gated calls doing I2C (startCapture -> setHeadsetMic) then deadlocked against
+     * the jack thread's I2C reads and froze the trackpad on the same bus. */
+    ownWorkLoop = IOWorkLoop::workLoop();
+    if (ownWorkLoop) {
         commandGate = IOCommandGate::commandGate(this);
         if (commandGate) {
-            getWorkLoop()->addEventSource(commandGate);
+            ownWorkLoop->addEventSource(commandGate);
         }
     }
 
@@ -392,10 +396,11 @@ void MateBookAudioDevice::stop(IOService *provider) {
     }
     PMstop();
     if (commandGate) {
-        if (getWorkLoop()) getWorkLoop()->removeEventSource(commandGate);
+        if (ownWorkLoop) ownWorkLoop->removeEventSource(commandGate);
         commandGate->release();
         commandGate = nullptr;
     }
+    if (ownWorkLoop) { ownWorkLoop->release(); ownWorkLoop = nullptr; }
     if (flagsBuf) { flagsBuf->complete(); flagsBuf->release(); flagsBuf = nullptr; }
     if (fwStagingBuf) { fwStagingBuf->complete(); fwStagingBuf->release(); fwStagingBuf = nullptr; }
     fwStagingLen = 0;

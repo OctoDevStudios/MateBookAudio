@@ -5,6 +5,7 @@
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/IOWorkLoop.h>
+#include <IOKit/IOWorkLoop.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/pwr_mgt/RootDomain.h>
@@ -141,6 +142,8 @@ private:
     UInt32 fwStagingLen;       // bytes valid in fwStagingBuf (0 = empty)
 
     IOCommandGate     *commandGate;
+
+    IOWorkLoop *ownWorkLoop;   // dedicated: the PCI parent work loop is shared with VoodooI2C (deadlock)
     IOPMrootDomain    *rootDomain;
     IONotifier        *powerNotifier;
 
