@@ -71,6 +71,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/syslog.h>
+#include <xmmintrin.h>
 
 //==================================================================================================
 #pragma mark -
@@ -4600,6 +4601,13 @@ static OSStatus	CmlSOF_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioO
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 	
+	//	Denormals: when the filters (output DSP, mic high-pass) decay toward silence, x86 runs
+	//	~60x slower (measured: 0.3 % -> 20-40 % of a core while a stream plays silence).
+	//	CoreAudio's IO thread does not set FTZ/DAZ, so enable them for this IO cycle only and
+	//	restore the caller's MXCSR on exit.
+	const unsigned int theSavedCSR = _mm_getcsr();
+	_mm_setcsr(theSavedCSR | 0x8040);
+	
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "CmlSOF_DoIOOperation: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "CmlSOF_DoIOOperation: bad device ID");
@@ -4701,6 +4709,7 @@ static OSStatus	CmlSOF_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioO
 	}
 
 Done:
+	_mm_setcsr(theSavedCSR);
 	return theAnswer;
 }
 
