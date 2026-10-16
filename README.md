@@ -14,6 +14,9 @@ MateBookAudio drives the whole path itself:
 | Internal microphone (DMIC) | ✅ |
 | Headset microphone | ✅ shown as *External Microphone* when a 4-pole headset is plugged in |
 | Volume, mute, sleep / wake | ✅ |
+| Calls (FaceTime, Zoom… with Apple voice processing / echo cancellation) | ✅ |
+
+Tested on **macOS Tahoe 26.7.1** and **macOS Sonoma 14.8**.
 
 ![Speaker frequency response](docs/speaker-response.svg)
 
@@ -39,7 +42,7 @@ The full write-up (register values, bugs, calibration) is in [docs/AUDIO.md](doc
 
 ## Requirements
 
-- macOS 14 Sonoma (tested on 14.8), OpenCore, SIP may stay enabled.
+- macOS 14 Sonoma or later — tested on Tahoe 26.7.1 and Sonoma 14.8. OpenCore, SIP may stay enabled.
 - [VoodooI2C](https://github.com/VoodooI2C/VoodooI2C) loaded (the codec sits on the same I2C
   controller as the trackpad).
 - Xcode Command Line Tools to build.
@@ -59,6 +62,19 @@ The full write-up (register values, bugs, calibration) is in [docs/AUDIO.md](doc
 
 For a ready-made MateBook D15 EFI, see
 [huawei-matebook-d15-hackintosh](https://github.com/OctoDevStudios/huawei-matebook-d15-hackintosh).
+
+## Changelog
+
+**v1.1.0**
+- The HAL clock now follows the real DMA position of the card instead of a free-running host
+  clock. Speaker → mic latency is now fixed (~37 ms) instead of drifting between ~10 and
+  ~350 ms, which broke echo cancellation: calls using Apple voice processing sounded wrong.
+- The mic is read at a fixed offset from playback (re-measured if capture restarts).
+- Denormals flushed in the IO cycle (high CPU use while the DSP filters decay to silence).
+- Fixed a boot-time deadlock with VoodooI2C that could freeze the trackpad.
+- Tested on macOS Tahoe 26.7.1.
+
+**v1.0.0** — first release (Sonoma).
 
 ## Other laptops
 

@@ -262,6 +262,21 @@ static bool						gMute_Output_Master_Value		= false;	// unmuted — user request
 // Hardware clock tracking (DPIB-based)
 static UInt64					gHWClock_TotalFrames			= 0;
 static UInt32					gHWClock_LastDPIBFrames			= 0;
+//	Clock locked to the real DMA position (DPIB, 48-frame steps): HAL time follows the
+//	card, so output and mic keep a fixed latency (required by echo cancellation /
+//	voice processing in calls). Falls back to the host clock if the DMA stalls.
+static int						gHWClock_Valid					= 0;
+static int						gHWClock_HaveZero				= 0;
+static UInt64					gHWClock_ZeroSample				= 0;
+static UInt64					gHWClock_ZeroHost				= 0;
+static UInt64					gHWClock_LastObsFrames			= 0;
+static UInt64					gHWClock_LastObsHost			= 0;
+static UInt64					gHWClock_LastMoveHost			= 0;
+static UInt64					gHWClock_LastCapCheckHost		= 0;
+static UInt32					gCapOffsetFrames				= 0;
+static int MB_ReadDMAPos(uint32_t inSelector, UInt32* outFrames);
+static void MB_UpdateCapOffset(void);
+static void MB_HWClockStart(void);
 
 static const UInt32				kDataSource_NumberItems			= 2;	//	0 = internal, 1 = jack (headphones / external mic)
 #define							kDataSource_ItemNamePattern		"Internal Speaker"
@@ -4405,6 +4420,8 @@ static OSStatus	CmlSOF_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectI
 		gDevice_AnchorHostTime = mach_absolute_time();
 		gHWClock_TotalFrames = 0;
 		gHWClock_LastDPIBFrames = 0;
+		MB_HWClockStart();
+		MB_UpdateCapOffset();
 	}
 	else
 	{
@@ -4477,6 +4494,37 @@ Done:
 	return theAnswer;
 }
 
+static int MB_ReadDMAPos(uint32_t inSelector, UInt32* outFrames)
+{
+	uint64_t o = 0; uint32_t n = 1;
+	if(gKextConnection == 0 || IOConnectCallScalarMethod(gKextConnection, inSelector, NULL, 0, &o, &n) != KERN_SUCCESS) return 0;
+	*outFrames = (UInt32)(o % kCmlSOF_BufferFrames);
+	return 1;
+}
+
+//	Capture ring / playback ring offset (both DMAs run on the same clock).
+static void MB_UpdateCapOffset(void)
+{
+	UInt32 p = 0, c = 0, p2 = 0;
+	if(!MB_ReadDMAPos(kCmlSOF_GetPosition, &p) || !MB_ReadDMAPos(kCmlSOF_GetCapPosition, &c) || !MB_ReadDMAPos(kCmlSOF_GetPosition, &p2)) return;
+	if(c == 0) return;	//	capture stopped
+	UInt32 pm = (p + ((p2 + kCmlSOF_BufferFrames - p) % kCmlSOF_BufferFrames) / 2) % kCmlSOF_BufferFrames;
+	gCapOffsetFrames = (c + kCmlSOF_BufferFrames - pm) % kCmlSOF_BufferFrames;
+}
+
+static void MB_HWClockStart(void)
+{
+	UInt32 p = 0;
+	gHWClock_Valid = 0; gHWClock_HaveZero = 0;
+	if(!MB_ReadDMAPos(kCmlSOF_GetPosition, &p)) return;
+	UInt64 now = mach_absolute_time();
+	gHWClock_TotalFrames = p;
+	gHWClock_LastDPIBFrames = p;
+	gHWClock_LastObsFrames = p; gHWClock_LastObsHost = now;
+	gHWClock_LastMoveHost = now; gHWClock_LastCapCheckHost = 0;
+	gHWClock_Valid = 1;
+}
+
 static OSStatus	CmlSOF_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, Float64* outSampleTime, UInt64* outHostTime, UInt64* outSeed)
 {
 	//	This method returns the current zero time stamp for the device. The HAL models the timing of
@@ -4506,6 +4554,64 @@ static OSStatus	CmlSOF_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, Aud
 
 	//	get the current host time
 	theCurrentHostTime = mach_absolute_time();
+
+	if(gHWClock_Valid)
+	{
+		UInt32 p = 0;
+		if(MB_ReadDMAPos(kCmlSOF_GetPosition, &p))
+		{
+			UInt32 d = (p + kCmlSOF_BufferFrames - gHWClock_LastDPIBFrames) % kCmlSOF_BufferFrames;
+			if(d != 0)
+			{
+				UInt64 prevFrames = gHWClock_TotalFrames, prevHost = gHWClock_LastObsHost;
+				gHWClock_TotalFrames += d; gHWClock_LastDPIBFrames = p; gHWClock_LastMoveHost = theCurrentHostTime;
+				UInt64 boundary = gHWClock_TotalFrames - (gHWClock_TotalFrames % kDevice_RingBufferSize);
+				if(!gHWClock_HaveZero)
+				{
+					gHWClock_ZeroSample = boundary;
+					gHWClock_ZeroHost = theCurrentHostTime - (UInt64)((Float64)(gHWClock_TotalFrames - boundary) * gDevice_HostTicksPerFrame);
+					gHWClock_HaveZero = 1;
+				}
+				else if(boundary > gHWClock_ZeroSample)
+				{
+					//	Interpolate the exact host time of the boundary crossing between two observations.
+					Float64 tpf = (gHWClock_TotalFrames > prevFrames && theCurrentHostTime > prevHost)
+						? (Float64)(theCurrentHostTime - prevHost) / (Float64)(gHWClock_TotalFrames - prevFrames) : gDevice_HostTicksPerFrame;
+					if(tpf < gDevice_HostTicksPerFrame * 0.5 || tpf > gDevice_HostTicksPerFrame * 2.0) tpf = gDevice_HostTicksPerFrame;
+					UInt64 h = (boundary >= prevFrames) ? prevHost + (UInt64)((Float64)(boundary - prevFrames) * tpf)
+						: theCurrentHostTime - (UInt64)((Float64)(gHWClock_TotalFrames - boundary) * gDevice_HostTicksPerFrame);
+					if(h <= gHWClock_ZeroHost) h = gHWClock_ZeroHost + (UInt64)((Float64)(boundary - gHWClock_ZeroSample) * gDevice_HostTicksPerFrame);
+					gHWClock_ZeroSample = boundary;
+					gHWClock_ZeroHost = h;
+				}
+				gHWClock_LastObsFrames = gHWClock_TotalFrames; gHWClock_LastObsHost = theCurrentHostTime;
+			}
+			else if((Float64)(theCurrentHostTime - gHWClock_LastMoveHost) > gDevice_HostTicksPerFrame * 4800.0)
+			{
+				//	DMA frozen for > 100 ms: fall back to the host clock without a time jump.
+				gHWClock_Valid = 0;
+				if(gHWClock_HaveZero)
+				{
+					gDevice_NumberTimeStamps = gHWClock_ZeroSample / kDevice_RingBufferSize;
+					gDevice_AnchorHostTime = gHWClock_ZeroHost - (UInt64)((Float64)gDevice_NumberTimeStamps * gDevice_HostTicksPerFrame * (Float64)kDevice_RingBufferSize);
+				}
+			}
+			//	Re-sync the capture/playback offset once per second (capture restart, jack…).
+			if(gHWClock_Valid && (Float64)(theCurrentHostTime - gHWClock_LastCapCheckHost) > gDevice_HostTicksPerFrame * 48000.0)
+			{
+				MB_UpdateCapOffset();
+				gHWClock_LastCapCheckHost = theCurrentHostTime;
+			}
+		}
+		if(gHWClock_Valid && gHWClock_HaveZero)
+		{
+			*outSampleTime = (Float64)gHWClock_ZeroSample;
+			*outHostTime = gHWClock_ZeroHost;
+			*outSeed = 1;
+			pthread_mutex_unlock(&gDevice_IOMutex);
+			goto Done;
+		}
+	}
 
 	//	calculate the next host time
 	theHostTicksPerRingBuffer = gDevice_HostTicksPerFrame * ((Float64)kDevice_RingBufferSize);
@@ -4623,7 +4729,7 @@ static OSStatus	CmlSOF_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioO
 		{
 			#define kCapCh 2
 			UInt64 sampleTime = (UInt64)inIOCycleInfo->mInputTime.mSampleTime;
-			UInt32 frameOffset = (UInt32)(sampleTime % kCmlSOF_BufferFrames);
+			UInt32 frameOffset = (UInt32)((sampleTime + (gHWClock_Valid ? gCapOffsetFrames : 0)) % kCmlSOF_BufferFrames);
 
 			const int32_t *src = (const int32_t *)gCaptureBuffer;
 			Float32 *dst = (Float32 *)ioMainBuffer;
