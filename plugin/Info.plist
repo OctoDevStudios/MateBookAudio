@@ -9,7 +9,7 @@
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
 	<key>CFBundleVersion</key>
-	<string>1.1.0</string>
+	<string>1.1.1</string>
 	<key>CFPlugInFactories</key>
 	<dict>
 		<key>C1030A0D-50F0-4A1D-B3E0-DEADBEEF0001</key>

@@ -65,6 +65,11 @@ For a ready-made MateBook D15 EFI, see
 
 ## Changelog
 
+**v1.1.1**
+- Data sources use Apple's codes (`ispk`/`hdpn` for speakers/headphones, `imic`/`emic` for the
+  mics), like a real Mac. macOS now finds the internal speakers, so the charging chime
+  (PowerChime) plays.
+
 **v1.1.0**
 - The HAL clock now follows the real DMA position of the card instead of a free-running host
   clock. Speaker → mic latency is now fixed (~37 ms) instead of drifting between ~10 and

@@ -282,6 +282,9 @@ static const UInt32				kDataSource_NumberItems			= 2;	//	0 = internal, 1 = jack 
 #define							kDataSource_ItemNamePattern		"Internal Speaker"
 static UInt32					gDataSource_Input_Master_Value	= 0;
 static UInt32					gDataSource_Output_Master_Value	= 0;
+static UInt32 MB_DSExternalID(AudioObjectID inObjectID, UInt32 inIndex);
+static UInt32 MB_DSIndex(UInt32 inID);
+
 
 //==================================================================================================
 #pragma mark -
@@ -3643,7 +3646,7 @@ static OSStatus	CmlSOF_GetControlPropertyData(AudioServerPlugInDriverRef inDrive
 					//	Note that we need to take the state lock to examine this value.
 					FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "CmlSOF_GetControlPropertyData: not enough space for the return value of kAudioSelectorControlPropertyCurrentItem for the data source control");
 					pthread_mutex_lock(&gPlugIn_StateMutex);
-					*((UInt32*)outData) = (inObjectID == kObjectID_DataSource_Input_Master) ? gDataSource_Input_Master_Value : gDataSource_Output_Master_Value;
+					*((UInt32*)outData) = MB_DSExternalID(inObjectID, (inObjectID == kObjectID_DataSource_Input_Master) ? gDataSource_Input_Master_Value : gDataSource_Output_Master_Value);
 					pthread_mutex_unlock(&gPlugIn_StateMutex);
 					*outDataSize = sizeof(UInt32);
 					break;
@@ -3666,7 +3669,7 @@ static OSStatus	CmlSOF_GetControlPropertyData(AudioServerPlugInDriverRef inDrive
 					//	(speakers OR headphones; internal mic OR headset mic).
 					if(theNumberItemsToFetch > 1) theNumberItemsToFetch = 1;
 					if(theNumberItemsToFetch == 1)
-						((UInt32*)outData)[0] = (inObjectID == kObjectID_DataSource_Input_Master) ? gDataSource_Input_Master_Value : gDataSource_Output_Master_Value;
+						((UInt32*)outData)[0] = MB_DSExternalID(inObjectID, (inObjectID == kObjectID_DataSource_Input_Master) ? gDataSource_Input_Master_Value : gDataSource_Output_Master_Value);
 					*outDataSize = theNumberItemsToFetch * sizeof(UInt32);
 					break;
 
@@ -3674,9 +3677,9 @@ static OSStatus	CmlSOF_GetControlPropertyData(AudioServerPlugInDriverRef inDrive
 					//	This returns the user-readable name for the selector item in the qualifier
 					FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "CmlSOF_GetControlPropertyData: not enough space for the return value of kAudioSelectorControlPropertyItemName for the data source control");
 					FailWithAction(inQualifierDataSize != sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "CmlSOF_GetControlPropertyData: wrong size for the qualifier of kAudioSelectorControlPropertyItemName for the data source control");
-					FailWithAction(*((const UInt32*)inQualifierData) >= kDataSource_NumberItems, theAnswer = kAudioHardwareIllegalOperationError, Done, "CmlSOF_GetControlPropertyData: the item in the qualifier is not valid for kAudioSelectorControlPropertyItemName for the data source control");
+					
 					{
-						UInt32 item = *((const UInt32*)inQualifierData);
+						UInt32 item = MB_DSIndex(*((const UInt32*)inQualifierData));
 						CFStringRef n = (inObjectID == kObjectID_DataSource_Input_Master)
 							? (item ? CFSTR("External Microphone") : CFSTR("Internal Microphone"))
 							: (item ? CFSTR("Headphones") : CFSTR("Internal Speakers"));
@@ -3872,13 +3875,13 @@ static OSStatus	CmlSOF_SetControlPropertyData(AudioServerPlugInDriverRef inDrive
 					//	For selector controls, we check to make sure the requested value is in the
 					//	available items list and just store the value.
 					FailWithAction(inDataSize != sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "CmlSOF_SetControlPropertyData: wrong size for the data for kAudioSelectorControlPropertyCurrentItem");
-					FailWithAction(*((const UInt32*)inData) != ((inObjectID == kObjectID_DataSource_Input_Master) ? gDataSource_Input_Master_Value : gDataSource_Output_Master_Value), theAnswer = kAudioHardwareIllegalOperationError, Done, "CmlSOF_SetControlPropertyData: requested item not in available items list for kAudioSelectorControlPropertyCurrentItem");
+					FailWithAction(MB_DSIndex(*((const UInt32*)inData)) != ((inObjectID == kObjectID_DataSource_Input_Master) ? gDataSource_Input_Master_Value : gDataSource_Output_Master_Value), theAnswer = kAudioHardwareIllegalOperationError, Done, "CmlSOF_SetControlPropertyData: requested item not in available items list for kAudioSelectorControlPropertyCurrentItem");
 					pthread_mutex_lock(&gPlugIn_StateMutex);
 					if(inObjectID == kObjectID_DataSource_Input_Master)
 					{
-						if(gDataSource_Input_Master_Value != *((const UInt32*)inData))
+						if(gDataSource_Input_Master_Value != MB_DSIndex(*((const UInt32*)inData)))
 						{
-							gDataSource_Input_Master_Value = *((const UInt32*)inData);
+							gDataSource_Input_Master_Value = MB_DSIndex(*((const UInt32*)inData));
 							*outNumberPropertiesChanged = 1;
 							outChangedAddresses[0].mSelector = kAudioSelectorControlPropertyCurrentItem;
 							outChangedAddresses[0].mScope = kAudioObjectPropertyScopeGlobal;
@@ -3887,9 +3890,9 @@ static OSStatus	CmlSOF_SetControlPropertyData(AudioServerPlugInDriverRef inDrive
 					}
 					else
 					{
-						if(gDataSource_Output_Master_Value != *((const UInt32*)inData))
+						if(gDataSource_Output_Master_Value != MB_DSIndex(*((const UInt32*)inData)))
 						{
-							gDataSource_Output_Master_Value = *((const UInt32*)inData);
+							gDataSource_Output_Master_Value = MB_DSIndex(*((const UInt32*)inData));
 							*outNumberPropertiesChanged = 1;
 							outChangedAddresses[0].mSelector = kAudioSelectorControlPropertyCurrentItem;
 							outChangedAddresses[0].mScope = kAudioObjectPropertyScopeGlobal;
@@ -4523,6 +4526,20 @@ static void MB_HWClockStart(void)
 	gHWClock_LastObsFrames = p; gHWClock_LastObsHost = now;
 	gHWClock_LastMoveHost = now; gHWClock_LastCapCheckHost = 0;
 	gHWClock_Valid = 1;
+}
+
+//	Data source item IDs exposed with Apple's codes (like a real Mac), so system
+//	components such as PowerChime find the internal speakers ('ispk').
+static UInt32 MB_DSExternalID(AudioObjectID inObjectID, UInt32 inIndex)
+{
+	if(inObjectID == kObjectID_DataSource_Input_Master) return inIndex ? 'emic' : 'imic';
+	return inIndex ? 'hdpn' : 'ispk';
+}
+
+static UInt32 MB_DSIndex(UInt32 inID)
+{
+	if(inID == 'emic' || inID == 'hdpn' || inID == 1) return 1;
+	return 0;
 }
 
 static OSStatus	CmlSOF_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, Float64* outSampleTime, UInt64* outHostTime, UInt64* outSeed)
